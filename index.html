@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Space Dodger TMA</title>
+    <script src="https://telegram.org"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b0c10;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            user-select: none;
+        }
+        canvas {
+            background: radial-gradient(circle, #1f2833 0%, #0b0c10 100%);
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 20px;
+            font-weight: bold;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #levelDisplay {
+            color: #ffb703;
+        }
+        #gameOverScreen {
+            position: absolute;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            background: rgba(11, 12, 16, 0.9);
+            padding: 30px;
+            border-radius: 16px;
+            border: 1px solid #45a29e;
+            text-align: center;
+            z-index: 20;
+        }
+        button {
+            margin-top: 15px;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 220px;
+        }
+        .btn-restart {
+            background-color: #45a29e;
+            color: #0b0c10;
+        }
+        .btn-donate {
+            background-color: #ffb703;
+            color: #0b0c10;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div>Счет: <span id="score">0</span></div>
+    <div id="levelDisplay">Уровень: <span id="level">1</span></div>
+</div>
+<canvas id="gameCanvas"></canvas>
+
+<div id="gameOverScreen">
+    <h2>Игра окончена!</h2>
+    <p>Ваш счет: <span id="finalScore">0</span> (Уровень <span id="finalLevel">1</span>)</p>
+    <button class="btn-donate" onclick="buyContinue()">Продолжить за 10 ⭐</button>
+    <button class="btn-restart" onclick="restartGame()">Начать заново</button>
+</div>
+
+<script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+        tg.expand();
+    }
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const player = {
+        x: window.innerWidth / 2,
+        y: window.innerHeight - 100,
+        radius: 18,
+        speed: 9, // Скорость движения корабля с клавиатуры
+        color: '#66fcf1'
+    };
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth || document.documentElement.clientWidth;
+        canvas.height = window.innerHeight || document.documentElement.clientHeight;
+        player.y = canvas.height - 100;
+        if (player.x > canvas.width) player.x = canvas.width / 2;
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    let score = 0;
+    let level = 1;
+    let isGameOver = false;
+    let animationId;
+    let obstacles = [];
+    let frameCount = 0;
+
+    // --- УПРАВЛЕНИЕ С КЛАВИАТУРЫ (WASD + Стрелки) ---
+    const keys = {
+        left: false,
+        right: false
+    };
+
+    window.addEventListener('keydown', (e) => {
+        // Используем e.code, чтобы управление работало даже при включенной русской раскладке (Ф/В)
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') {
+            keys.left = true;
+        }
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') {
+            keys.right = true;
+        }
+    });
+
+    window.addEventListener('keyup', (e) => {
+        if (e.code === 'KeyA' || e.code === 'ArrowLeft') {
+            keys.left = false;
+        }
+        if (e.code === 'KeyD' || e.code === 'ArrowRight') {
+            keys.right = false;
+        }
+    });
+
+    // --- УПРАВЛЕНИЕ ПАЛЬЦЕМ (ТЕЛЕФОН) ---
+    function movePlayerTouch(clientX) {
+        if (isGameOver || clientX === undefined) return;
+        player.x = clientX;
+        if (player.x < player.radius) player.x = player.radius;
+        if (player.x > canvas.width - player.radius) player.x = canvas.width - player.radius;
+    }
+
+    window.addEventListener('touchstart', (e) => {
+        if (e.touches && e.touches.length > 0) {
+            movePlayerTouch(e.touches[0].clientX);
+        }
+    }, { passive: true });
+
+    window.addEventListener('touchmove', (e) => {
+        if (e.touches && e.touches.length > 0) {
+            movePlayerTouch(e.touches[0].clientX);
+        }
+    }, { passive: true });
+
+    function spawnObstacle() {
+        const bonusRadius = Math.min(level * 1.5, 15);
+        const radius = Math.random() * 18 + 14 + bonusRadius;
+        const speedBoost = score * 0.25;
+        
+        obstacles.push({
+            x: Math.random() * (canvas.width - radius * 2) + radius,
+            y: -radius,
+            radius: radius,
+            speed: Math.random() * 3 + 4 + speedBoost,
+            color: level >= 4 ? '#ff0055' : '#e63946'
+        });
+    }
+
+    function update() {
+        if (isGameOver) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Обновляем позицию корабля при зажатых клавишах
+        if (keys.left) {
+            player.x -= player.speed;
+        }
+        if (keys.right) {
+            player.x += player.speed;
+        }
+
+        // Не даем кораблю улететь за края экрана
+        if (player.x < player.radius) player.x = player.radius;
+        if (player.x > canvas.width - player.radius) player.x = canvas.width - player.radius;
+
+        // Рисуем корабль игрока
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = player.color;
+        ctx.fill();
+        ctx.closePath();
+
+        // Генерация метеоритов
+        const spawnInterval = Math.max(8, 30 - Math.floor(score * 0.6));
+        
+        frameCount++;
+        if (frameCount >= spawnInterval) {
+            spawnObstacle();
+            frameCount = 0;
+        }
+
+        for (let i = 0; i < obstacles.length; i++) {
+            let obs = obstacles[i];
+            obs.y += obs.speed;
+
+            ctx.beginPath();
+            ctx.arc(obs.x, obs.y, obs.radius, 0, Math.PI * 2);
+            ctx.fillStyle = obs.color;
+            ctx.fill();
+            ctx.closePath();
+
+            const dist = Math.hypot(player.x - obs.x, player.y - obs.y);
+            if (dist - obs.radius - player.radius < 1) {
+                gameOver();
+            }
+
+            if (obs.y - obs.radius > canvas.height) {
+                obstacles.splice(i, 1);
+                i--;
+                score++;
+                document.getElementById('score').innerText = score;
+
+                const newLevel = Math.floor(score / 10) + 1;
+                if (newLevel > level) {
+                    level = newLevel;
+                    document.getElementById('level').innerText = level;
+                    if (tg?.HapticFeedback) {
+                        tg.HapticFeedback.impactOccurred('medium');
+                    }
+                }
+            }
+        }
+
+        animationId = requestAnimationFrame(update);
+    }
+
+    function gameOver() {
+        isGameOver = true;
+        keys.left = false;
+        keys.right = false;
+        cancelAnimationFrame(animationId);
+        if (tg?.HapticFeedback) {
+            tg.HapticFeedback.notificationOccurred('error');
+        }
+        document.getElementById('finalScore').innerText = score;
+        document.getElementById('finalLevel').innerText = level;
+        document.getElementById('gameOverScreen').style.display = 'flex';
+    }
+
+    function restartGame() {
+        score = 0;
+        level = 1;
+        obstacles = [];
+        frameCount = 0;
+        isGameOver = false;
+        player.x = canvas.width / 2;
+        document.getElementById('score').innerText = score;
+        document.getElementById('level').innerText = level;
+        document.getElementById('gameOverScreen').style.display = 'none';
+        update();
+    }
+
+    async function buyContinue() {
+        try {
+            const response = await fetch('https://ВАШ_ДОМЕН.ru/create-invoice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: tg?.initDataUnsafe?.user?.id })
+            });
+            const data = await response.json();
+
+            if (data.invoiceLink && tg) {
+                tg.openInvoice(data.invoiceLink, function(status) {
+                    if (status === 'paid') {
+                        tg.HapticFeedback.notificationOccurred('success');
+                        obstacles = [];
+                        isGameOver = false;
+                        document.getElementById('gameOverScreen').style.display = 'none';
+                        update();
+                    } else if (status === 'failed' || status === 'cancelled') {
+                        tg.showAlert('Оплата не была завершена.');
+                    }
+                });
+            }
+        } catch (error) {
+            alert('Ошибка соединения с сервером оплаты (оплата работает только внутри Telegram после настройки бэкенда).');
+        }
+    }
+
+    update();
+</script>
+</body>
+</html>
